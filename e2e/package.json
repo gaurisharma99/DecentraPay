@@ -1,0 +1,15 @@
+{
+  "name": "decentrapay-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless-browser E2E test for the DecentraPay frontend",
+  "scripts": {
+    "test": "node browser-test.js",
+    "test:network": "node network-test.js",
+    "test:web3": "node web3-client-test.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0",
+    "puppeteer-core": "^23.0.0"
+  }
+}
