@@ -1,0 +1,212 @@
+diff --git a/README.md b/README.md
+index e3f78aa..a4d2e44 100644
+--- a/README.md
++++ b/README.md
+@@ -115,6 +115,21 @@ Open http://localhost:3000
+ 
+ > The legacy frontend runs on port 5173 instead (`cd frontend && npm run dev`).
+ 
++## Demo Entries (for presentations)
++
++With the Hardhat node running and the contract deployed (steps 2-3 above):
++
++```bash
++cd backend
++npm run seed        # records 3 real, clearly-labelled demo payments on-chain
++```
++
++Import Hardhat account #0 into MetaMask and the **Transaction History**
++section shows them. To create a live entry during a demo, connect your wallet
++and click **✨ Use demo payment** above the form (prefills a receiver, 0.01 ETH
++and a message), then press **Send Payment**. The seed script refuses to run on
++any chain other than local Hardhat (31337).
++
+ ## Project Structure
+ 
+ ```
+@@ -227,6 +242,10 @@ npm run test:network
+   network is correct. The switch uses `wallet_switchEthereumChain`, falling back
+ to `wallet_addEthereumChain` if the network isn't added yet.
+ - **No wallet** — if MetaMask isn't installed, a banner links to the download page.
++- **Auto-connect** — on page load the app requests the wallet connection
++  immediately (MetaMask popup). If the user dismisses it, the app stays
++  disconnected and the **Connect** buttons remain available; it does not
++  re-prompt automatically.
+ - **Live sync** — the app listens for MetaMask's `accountsChanged` and
+   `chainChanged` events, so switching account or network updates the UI
+   immediately (and disconnecting clears the session).
+diff --git a/backend/package.json b/backend/package.json
+index 54861df..81301f3 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -10,7 +10,8 @@
+     "test": "hardhat test",
+     "compile": "hardhat compile",
+     "node": "hardhat node",
+-    "deploy": "hardhat run scripts/deploy.js"
++    "deploy": "hardhat run scripts/deploy.js",
++    "seed": "hardhat run scripts/seed-demo.js --network localhost"
+   },
+   "keywords": [],
+   "author": "",
+diff --git a/backend/scripts/seed-demo.js b/backend/scripts/seed-demo.js
+new file mode 100644
+index 0000000..9ed5aac
+--- /dev/null
++++ b/backend/scripts/seed-demo.js
+@@ -0,0 +1,48 @@
++// Seeds a few clearly-labelled demo payments on a LOCAL Hardhat node so the
++// "Transaction History" section has real on-chain entries to show.
++//
++// Usage (hardhat node running + contract deployed):
++//   npx hardhat run scripts/seed-demo.js --network localhost
++// Optional: CONTRACT_ADDRESS=0x... to override the default first-deploy address.
++//
++// Safe by design: refuses to run on any network other than chain 31337.
++const hre = require("hardhat");
++
++const DEFAULT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
++
++const DEMO_PAYMENTS = [
++  // [sender index, receiver index, amount (ETH), message]
++  [1, 0, "0.25", "Demo: Welcome to DecentraPay"],
++  [2, 0, "1.5", "Demo: Invoice #1042 - design work"],
++  [0, 3, "0.05", "Demo: Thanks for lunch"],
++];
++
++async function main() {
++  const { chainId } = await hre.ethers.provider.getNetwork();
++  if (chainId !== 31337n) {
++    throw new Error(`Refusing to seed demo data on chain ${chainId}; local Hardhat (31337) only.`);
++  }
++
++  const address = process.env.CONTRACT_ADDRESS || DEFAULT_ADDRESS;
++  const code = await hre.ethers.provider.getCode(address);
++  if (code === "0x") {
++    throw new Error(`No contract at ${address}. Run scripts/deploy.js first (same node).`);
++  }
++
++  const signers = await hre.ethers.getSigners();
++  const contract = await hre.ethers.getContractAt("DecentraPay", address);
++
++  for (const [from, to, eth, message] of DEMO_PAYMENTS) {
++    const tx = await contract
++      .connect(signers[from])
++      .sendPayment(signers[to].address, message, { value: hre.ethers.parseEther(eth) });
++    await tx.wait();
++    console.log(`#${from} -> #${to}  ${eth} ETH  "${message}"`);
++  }
++  console.log("Total payments on-chain:", (await contract.totalPayments()).toString());
++}
++
++main().catch((err) => {
++  console.error(err.message || err);
++  process.exitCode = 1;
++});
+diff --git a/frontend/src/components/Hero.jsx b/frontend/src/components/Hero.jsx
+index 9601735..22897b8 100644
+--- a/frontend/src/components/Hero.jsx
++++ b/frontend/src/components/Hero.jsx
+@@ -30,6 +30,7 @@ function Hero() {
+     connectWallet,
+     handleChange,
+     sendPayment,
++    fillDemoPayment,
+     formData,
+     isLoading,
+     isWrongNetwork,
+@@ -108,6 +109,15 @@ function Hero() {
+ 
+         {/* Payment Form */}
+         <div className="glass-blue p-6 mt-6">
++          {currentAccount && !isWrongNetwork && (
++            <button
++              type="button"
++              onClick={fillDemoPayment}
++              className="text-cyan-400 hover:text-cyan-300 text-sm font-medium mb-1"
++            >
++              ✨ Use demo payment
++            </button>
++          )}
+           <InputField 
+             placeholder="Receiver Wallet Address (0x...)" 
+             name="recipient" 
+diff --git a/frontend/src/context/PaymentsContext.jsx b/frontend/src/context/PaymentsContext.jsx
+index d78e2ea..44cf033 100644
+--- a/frontend/src/context/PaymentsContext.jsx
++++ b/frontend/src/context/PaymentsContext.jsx
+@@ -14,8 +14,18 @@ const HARDHAT_NETWORK = {
+   rpcUrls: ['http://127.0.0.1:8545'],
+ };
+ 
++// Well-known Hardhat dev accounts (#1, #2) used to prefill a demo payment.
++const DEMO_RECEIVERS = [
++  '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
++  '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
++];
++
+ const hasWallet = typeof window !== 'undefined' && !!window.ethereum;
+ 
++// Auto-connect guard. Module-level (not component state) so React 18
++// StrictMode's double-mounted effect in dev doesn't fire two MetaMask popups.
++let autoConnectAttempted = false;
++
+ // ethers v6: getSigner() returns a Promise, so it must be awaited
+ // before constructing the Contract, otherwise every call fails with
+ // "contract runner does not support calling".
+@@ -38,6 +48,20 @@ export function PaymentsProvider({ children }) {
+     setFormData((prev) => ({ ...prev, [name]: e.target.value }));
+   };
+ 
++  // Prefill the form with a valid demo payment (local Hardhat network only).
++  // Picks a receiver different from the connected account so it never trips
++  // the contract's self-payment check.
++  const fillDemoPayment = () => {
++    const receiver =
++      DEMO_RECEIVERS.find((a) => a.toLowerCase() !== currentAccount.toLowerCase()) ||
++      DEMO_RECEIVERS[0];
++    setFormData({
++      recipient: receiver,
++      amount: '0.01',
++      message: 'Demo payment from DecentraPay',
++    });
++  };
++
+   const fetchPayments = async () => {
+     if (!window.ethereum) return;
+     try {
+@@ -67,6 +91,26 @@ export function PaymentsProvider({ children }) {
+       if (accounts.length) {
+         setCurrentAccount(accounts[0]);
+         fetchPayments();
++        return;
++      }
++
++      // No account authorised yet: open the MetaMask connect popup right away
++      // on page load (once). If the user dismisses it, the "Connect" buttons
++      // in the navbar/hero still work as a manual fallback.
++      if (autoConnectAttempted) return;
++      autoConnectAttempted = true;
++      try {
++        const granted = await window.ethereum.request({ method: 'eth_requestAccounts' });
++        if (granted.length) {
++          setCurrentAccount(granted[0]);
++          fetchPayments();
++        }
++      } catch (reqErr) {
++        // 4001 = user rejected, -32002 = a connect request is already pending.
++        // Both are expected; stay disconnected and don't retry automatically.
++        if (reqErr?.code !== 4001 && reqErr?.code !== -32002) {
++          console.error('Auto-connect failed:', reqErr);
++        }
+       }
+     } catch (err) {
+       console.error('Wallet check failed:', err);
+@@ -201,6 +245,7 @@ export function PaymentsProvider({ children }) {
+       value={{
+         currentAccount,
+         connectWallet,
++        fillDemoPayment,
+         formData,
+         handleChange,
+         sendPayment,
