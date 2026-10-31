@@ -1,0 +1,57 @@
+diff --git a/README.md b/README.md
+index e3f78aa..01fa4c3 100644
+--- a/README.md
++++ b/README.md
+@@ -227,6 +227,10 @@ npm run test:network
+   network is correct. The switch uses `wallet_switchEthereumChain`, falling back
+ to `wallet_addEthereumChain` if the network isn't added yet.
+ - **No wallet** — if MetaMask isn't installed, a banner links to the download page.
++- **Auto-connect** — on page load the app requests the wallet connection
++  immediately (MetaMask popup). If the user dismisses it, the app stays
++  disconnected and the **Connect** buttons remain available; it does not
++  re-prompt automatically.
+ - **Live sync** — the app listens for MetaMask's `accountsChanged` and
+   `chainChanged` events, so switching account or network updates the UI
+   immediately (and disconnecting clears the session).
+diff --git a/frontend/src/context/PaymentsContext.jsx b/frontend/src/context/PaymentsContext.jsx
+index d78e2ea..fbd7df8 100644
+--- a/frontend/src/context/PaymentsContext.jsx
++++ b/frontend/src/context/PaymentsContext.jsx
+@@ -16,6 +16,10 @@ const HARDHAT_NETWORK = {
+ 
+ const hasWallet = typeof window !== 'undefined' && !!window.ethereum;
+ 
++// Auto-connect guard. Module-level (not component state) so React 18
++// StrictMode's double-mounted effect in dev doesn't fire two MetaMask popups.
++let autoConnectAttempted = false;
++
+ // ethers v6: getSigner() returns a Promise, so it must be awaited
+ // before constructing the Contract, otherwise every call fails with
+ // "contract runner does not support calling".
+@@ -67,6 +71,26 @@ export function PaymentsProvider({ children }) {
+       if (accounts.length) {
+         setCurrentAccount(accounts[0]);
+         fetchPayments();
++        return;
++      }
++
++      // No account authorised yet: open the MetaMask connect popup right away
++      // on page load (once). If the user dismisses it, the "Connect" buttons
++      // in the navbar/hero still work as a manual fallback.
++      if (autoConnectAttempted) return;
++      autoConnectAttempted = true;
++      try {
++        const granted = await window.ethereum.request({ method: 'eth_requestAccounts' });
++        if (granted.length) {
++          setCurrentAccount(granted[0]);
++          fetchPayments();
++        }
++      } catch (reqErr) {
++        // 4001 = user rejected, -32002 = a connect request is already pending.
++        // Both are expected; stay disconnected and don't retry automatically.
++        if (reqErr?.code !== 4001 && reqErr?.code !== -32002) {
++          console.error('Auto-connect failed:', reqErr);
++        }
+       }
+     } catch (err) {
+       console.error('Wallet check failed:', err);
